@@ -64,8 +64,52 @@ def print_result(index: int, message: str, result: dict):
     print(f"     Issue Type  : {result.get('issue_type', 'N/A').upper()}")
     print(f"     Confidence  : {result.get('confidence', 0):.0%}")
     print(f"\n  🔄 ROUTING:")
-    handler = result.get("handler_context", {}).get("handler", "N/A")
+    handler_ctx = result.get("handler_context", {})
+    handler = handler_ctx.get("handler", "N/A")
     print(f"     Handled by  : {handler.title()} Handler")
+
+    # --- Database Transparency Section ---
+    db_query = handler_ctx.get("db_query") or handler_ctx.get("db_queries")
+    if db_query:
+        print(f"\n  🗄️  DATABASE QUERIES:")
+        if isinstance(db_query, list):
+            for i, q in enumerate(db_query, 1):
+                print(f"     [{i}] {q}")
+        else:
+            print(f"     {db_query}")
+
+    # Show key data retrieved from DB
+    if "order_data" in handler_ctx:
+        od = handler_ctx["order_data"]
+        print(f"\n  📦 DATA RETRIEVED (Orders DB):")
+        print(f"     Order ID    : {od.get('order_id', 'N/A')}")
+        print(f"     Status      : {od.get('status', 'N/A')}")
+        shipping = od.get("shipping", {})
+        print(f"     Carrier     : {shipping.get('carrier', 'N/A')}")
+        print(f"     Tracking #  : {shipping.get('tracking_number', 'N/A')}")
+        print(f"     ETA         : {shipping.get('estimated_delivery', 'N/A')}")
+    elif "refund_policy" in handler_ctx:
+        rp = handler_ctx["refund_policy"]
+        re_ = handler_ctx.get("refund_eligibility", {})
+        print(f"\n  💳 DATA RETRIEVED (Refund DB):")
+        print(f"     Policy      : {rp.get('policy_name', 'N/A')}")
+        print(f"     Window      : {rp.get('return_window_days', 'N/A')} days")
+        print(f"     Processing  : {rp.get('refund_processing_days', 'N/A')}")
+        print(f"     Eligibility : {re_.get('status', 'N/A')}")
+    elif "kb_article" in handler_ctx:
+        kb = handler_ctx["kb_article"]
+        print(f"\n  📖 DATA RETRIEVED (Knowledge Base DB):")
+        print(f"     Article ID  : {kb.get('article_id', 'N/A')}")
+        print(f"     Title       : {kb.get('title', 'N/A')}")
+        print(f"     Match Score : {handler_ctx.get('match_score', 'N/A')}")
+        print(f"     Resolution  : {kb.get('resolution_rate', 0):.0%}")
+    elif "faq_data" in handler_ctx:
+        faq_list = handler_ctx["faq_data"]
+        print(f"\n  📋 DATA RETRIEVED (FAQ DB):")
+        print(f"     Rows returned: {handler_ctx.get('rows_returned', len(faq_list))}")
+        if isinstance(faq_list, list):
+            for faq in faq_list[:3]:
+                print(f"     • [{faq.get('faq_id','?')}] {faq.get('question','?')}")
 
     if result.get("escalate"):
         print(f"\n  ⚠️  ESCALATED TO HUMAN:")

@@ -15,6 +15,8 @@ Screenshots of demo:
 
 ![alt text](image-3.png)
 
+![alt text](image-4.png)
+
 ## Table of Contents
 
 1. [Use Case Definition](#1-use-case-definition)
@@ -148,10 +150,10 @@ E-commerce companies receive thousands of customer support messages daily. Most 
 | Component | Technology | Role |
 |-----------|-----------|------|
 | **Orchestration** | LangGraph | Defines the agent as a stateful graph with nodes and conditional edges |
-| **LLM / Inference** | Google Gemini (`gemini-2.0-flash`) | Classification and response generation |
+| **LLM / Inference** | Google Gemini (`gemini-2.5-flash`) | Classification and response generation |
 | **LLM Framework** | LangChain (`langchain-google-genai`) | Standardized interface for LLM calls |
 | **State Management** | Python TypedDict | Shared state flowing through all nodes |
-| **External APIs** | Simulated (Python functions) | Order DB, Refund system, Knowledge Base, FAQ DB |
+| **Simulated Database** | `database.py` (in-memory tables) | Orders, Refunds, KB, FAQ, Tickets — returns real DB-format responses |
 | **Configuration** | python-dotenv | Environment variable management |
 
 ### LangGraph Concepts Used
@@ -257,12 +259,13 @@ graph = builder.compile()
 
 In a production system, node functions would call real APIs:
 
-| Service | API Example | Our Simulation |
+| Service | API / DB Query | Our Simulation (`database.py`) |
 |---------|------------|----------------|
-| Order Management | `GET /api/orders/{id}` | Returns mock order data dict |
-| Payment/Refund | `POST /api/refunds` | Returns mock refund policy |
-| Knowledge Base | `GET /api/kb/search?q=...` | Keyword-based mock KB lookup |
-| CRM / Customer DB | `GET /api/customers/{id}` | Returns mock FAQ data |
+| Order Management | `SELECT * FROM orders WHERE order_id = ?` | `query_order_by_id()` — full order row |
+| Payment/Refund | `SELECT * FROM refund_policies` | `query_refund_policy()` + `query_refund_eligibility()` |
+| Knowledge Base | `SELECT * FROM kb_articles WHERE tags @> ARRAY[...]` | `query_kb_article(keywords)` — tag-based search |
+| FAQ Database | `SELECT * FROM faqs ORDER BY views DESC` | `query_faqs()` — all FAQ rows |
+| Ticketing | `INSERT INTO support_tickets (...)` | `insert_support_ticket()` — auto-ID + priority |
 
 ### Step 9: Integrate LLM / Inference APIs
 
@@ -288,15 +291,19 @@ In a production system, node functions would call real APIs:
 ### 5.1 Project File Structure
 
 ```
-Agentic_AI/
-├── .env                       # API key configuration
+Customer-support-agent/
+├── .env                       # API key configuration (GOOGLE_API_KEY)
+├── .env.example               # Template for .env
 ├── requirements.txt           # Python dependencies
+├── database.py                # Simulated DB layer — tables + query functions
+│                              #   (Orders, Refunds, KB, FAQ, Tickets)
 ├── state.py                   # State schema (TypedDict)
-├── nodes.py                   # All 8 node functions
+├── nodes.py                   # All 8 node functions (use database.py queries)
 ├── graph.py                   # Graph construction & compilation
-├── main.py                    # Entry point & test harness
-|-- test_agent.py              # Unit tests for node functions (optional)
+├── main.py                    # Interactive entry point (type queries live)
+├── test_agent.py              # Pre-defined test suite (5 scenarios)
 ├── README.md                  # This document
+└── venv/                      # Virtual environment
 ```
 
 ### 5.2 State Schema (Data Flow Contract)
@@ -316,13 +323,13 @@ Agentic_AI/
 | Node | Type | Input Fields | Output Fields | External Calls |
 |------|------|-------------|---------------|----------------|
 | `classify_issue` | LLM | `customer_message` | `issue_type`, `confidence` | Gemini API |
-| `handle_delivery` | Tool/API | `customer_message` | `handler_context` | Order DB (sim) |
-| `handle_refund` | Tool/API | `customer_message` | `handler_context` | Payment API (sim) |
-| `handle_technical` | Tool/API | `customer_message` | `handler_context` | Knowledge Base (sim) |
-| `handle_general` | Tool/API | — | `handler_context` | FAQ DB (sim) |
+| `handle_delivery` | DB Query | `customer_message` | `handler_context` | `query_order_by_id()` from `database.py` |
+| `handle_refund` | DB Query | `customer_message` | `handler_context` | `query_refund_policy()` + `query_refund_eligibility()` |
+| `handle_technical` | DB Query | `customer_message` | `handler_context` | `query_kb_article()` from `database.py` |
+| `handle_general` | DB Query | — | `handler_context` | `query_faqs()` from `database.py` |
 | `check_escalation` | Logic | `confidence`, `customer_message` | `escalate`, `escalation_reason` | None |
 | `generate_response` | LLM | `customer_message`, `issue_type`, `handler_context` | `response` | Gemini API |
-| `escalate_to_human` | Logic | `customer_message`, `issue_type`, `escalation_reason` | `response` | None |
+| `escalate_to_human` | DB Insert | `customer_message`, `issue_type`, `escalation_reason` | `response` | `insert_support_ticket()` from `database.py` |
 
 ### 5.4 Routing Logic
 
@@ -426,20 +433,45 @@ Loads the `.env` file, validates the API key, defines 5 test scenarios, and runs
 
 In a production agentic AI application, the handler nodes would integrate with real external services:
 
-| Service | Purpose | Real-World API Example | Our Simulation |
+| Service | Purpose | Real-World API Example | Our Simulation (`database.py`) |
 |---------|---------|----------------------|----------------|
-| **Order Management System** | Look up order status, tracking | Shopify Orders API, WooCommerce API | Returns mock order dict with tracking number |
-| **Payment Gateway / Refund System** | Process refunds, check eligibility | Stripe Refunds API, Razorpay API | Returns mock refund policy dict |
-| **Knowledge Base / Documentation** | Find troubleshooting articles | Zendesk KB API, Confluence API | Keyword-based mock article lookup |
-| **CRM / Customer Database** | Retrieve customer history, preferences | Salesforce API, HubSpot API | Returns mock FAQ data |
-| **Notification Service** | Alert human agents for escalation | Slack API, email, PagerDuty | Print to console |
+| **Order Management System** | Look up order status, tracking | Shopify Orders API, WooCommerce API | `query_order_by_id()` — returns full order row with shipping, payment, timestamps |
+| **Payment Gateway / Refund System** | Process refunds, check eligibility | Stripe Refunds API, Razorpay API | `query_refund_policy()` + `query_refund_eligibility()` — returns policy row + eligibility status |
+| **Knowledge Base / Documentation** | Find troubleshooting articles | Zendesk KB API, Confluence API | `query_kb_article()` — tag-based search with match score + resolution rate |
+| **CRM / Customer Database** | Retrieve customer info, FAQs | Salesforce API, HubSpot API | `query_faqs()` — returns FAQ rows with IDs and view counts |
+| **Ticketing System** | Create escalation tickets | Jira API, Zendesk Tickets API | `insert_support_ticket()` — INSERT with auto-generated ticket ID + priority |
+
+### Database Schema (Simulated)
+
+All query functions return data in the **exact format a real DB driver would**:
+
+```python
+# Example: query_order_by_id("12345") returns:
+{
+    "status": "found",
+    "rows_returned": 1,
+    "data": { ... full order row ... },
+    "query": "SELECT * FROM orders WHERE order_id = '12345'",
+    "executed_at": "2026-02-23T10:30:00Z"
+}
+```
+
+| Simulated Table | DB Query Function | Columns / Fields |
+|----------------|-------------------|------------------|
+| `ORDERS_TABLE` | `query_order_by_id(id)` | order_id, customer_id, status, items, shipping, payment, timestamps |
+| `CUSTOMERS_TABLE` | _(used internally)_ | customer_id, name, email, tier, total_orders |
+| `REFUND_POLICIES_TABLE` | `query_refund_policy()` | policy_id, return_window_days, conditions[], refund_method |
+| `REFUND_REQUESTS_TABLE` | `query_refund_eligibility(order_id)` | refund_id, status, reason, amount |
+| `KB_ARTICLES_TABLE` | `query_kb_article(keywords)` | article_id, title, tags[], steps[], resolution_rate |
+| `FAQ_TABLE` | `query_faqs()` | faq_id, question, answer, category, views |
+| `TICKETS_TABLE` | `insert_support_ticket(...)` | ticket_id, priority, status, assigned_to, timestamps |
 
 ### Model / Inference API
 
 | Component | Details |
 |-----------|---------|
 | **Provider** | Google AI (Gemini) |
-| **Model** | `gemini-2.0-flash` |
+| **Model** | `gemini-2.5-flash` |
 | **Tier** | Free (via AI Studio API key) |
 | **Usage** | 2 calls per agent run: 1 for classification, 1 for response generation |
 | **Integration** | Via `langchain-google-genai` package → `ChatGoogleGenerativeAI` |

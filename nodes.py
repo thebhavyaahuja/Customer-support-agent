@@ -17,6 +17,14 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from state import CustomerSupportState
+from database import (
+    query_order_by_id,
+    query_refund_policy,
+    query_refund_eligibility,
+    query_kb_article,
+    query_faqs,
+    insert_support_ticket,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -120,29 +128,24 @@ Customer message: "{customer_message}"
 # ===========================================================================
 def handle_delivery(state: CustomerSupportState) -> dict:
     """
-    Simulates looking up delivery/order information.
-    In a real system, this would call an Order Management API.
+    Looks up delivery/order information from the Orders database.
+    In production, this would call: SELECT * FROM orders WHERE order_id = %s
     """
     customer_message = state["customer_message"]
 
-    # --- Simulated API call: Order Management System ---
     # Extract order number if present (e.g., #12345)
     order_match = re.search(r"#?(\d{4,})", customer_message)
     order_id = order_match.group(1) if order_match else "UNKNOWN"
 
-    # Simulated order database response
-    simulated_order_data = {
-        "order_id": order_id,
-        "status": "In Transit",
-        "carrier": "FedEx",
-        "tracking_number": "FX-9876543210",
-        "estimated_delivery": "February 25, 2026",
-        "last_location": "Distribution Center, Mumbai",
-    }
+    # --- Database Query: Orders Table ---
+    db_result = query_order_by_id(order_id)
+    order_data = db_result["data"]
 
     handler_context = {
         "handler": "delivery",
-        "order_data": simulated_order_data,
+        "db_query": db_result["query"],
+        "db_status": db_result["status"],
+        "order_data": order_data,
         "instructions": (
             "Provide the customer with their order status, tracking number, "
             "and estimated delivery date. Be empathetic if there's a delay."
@@ -157,21 +160,30 @@ def handle_delivery(state: CustomerSupportState) -> dict:
 # ===========================================================================
 def handle_refund(state: CustomerSupportState) -> dict:
     """
-    Simulates checking refund eligibility and policy.
-    In a real system, this would call a Payment/Refund API.
+    Checks refund eligibility and policy from the database.
+    In production, this would query:
+      - SELECT * FROM refund_policies WHERE policy_id = 'default'
+      - SELECT * FROM refund_requests WHERE order_id = %s
     """
-    # --- Simulated API call: Refund/Payment System ---
-    simulated_refund_data = {
-        "refund_policy": "Full refund within 30 days of purchase for unused items. "
-                         "Damaged items are eligible for immediate replacement or refund.",
-        "refund_processing_time": "5-7 business days",
-        "refund_method": "Original payment method",
-        "return_shipping": "Free return shipping label provided",
-    }
+    customer_message = state["customer_message"]
+
+    # --- Database Query 1: Refund Policy ---
+    policy_result = query_refund_policy()
+    policy_data = policy_result["data"]
+
+    # --- Database Query 2: Check existing refund eligibility ---
+    order_match = re.search(r"#?(\d{4,})", customer_message)
+    order_id = order_match.group(1) if order_match else "67890"  # default for demo
+    eligibility_result = query_refund_eligibility(order_id)
 
     handler_context = {
         "handler": "refund",
-        "refund_data": simulated_refund_data,
+        "db_queries": [
+            policy_result["query"],
+            eligibility_result["query"],
+        ],
+        "refund_policy": policy_data,
+        "refund_eligibility": eligibility_result["data"],
         "instructions": (
             "Explain the refund/return policy clearly. Guide the customer through "
             "the return process. Be understanding about their frustration."
@@ -186,60 +198,37 @@ def handle_refund(state: CustomerSupportState) -> dict:
 # ===========================================================================
 def handle_technical(state: CustomerSupportState) -> dict:
     """
-    Simulates a knowledge base lookup for technical issues.
-    In a real system, this would query a KB/documentation API.
+    Queries the Knowledge Base database for relevant troubleshooting articles.
+    In production, this would query:
+      SELECT * FROM kb_articles WHERE tags @> ARRAY[...] ORDER BY resolution_rate DESC LIMIT 1
     """
     customer_message = state["customer_message"].lower()
 
-    # --- Simulated API call: Knowledge Base ---
-    # Simple keyword matching to simulate KB search results
-    if "crash" in customer_message or "crashing" in customer_message:
-        kb_article = {
-            "title": "App Crashing - Troubleshooting Steps",
-            "steps": [
-                "1. Force close the app and reopen it",
-                "2. Clear the app cache (Settings > Apps > Our App > Clear Cache)",
-                "3. Update the app to the latest version from the App Store",
-                "4. Restart your device",
-                "5. If the issue persists, uninstall and reinstall the app",
-            ],
-        }
-    elif "login" in customer_message or "password" in customer_message:
-        kb_article = {
-            "title": "Login Issues - Resolution Guide",
-            "steps": [
-                "1. Click 'Forgot Password' on the login page",
-                "2. Enter your registered email address",
-                "3. Check your inbox (and spam folder) for the reset link",
-                "4. Create a new password (min 8 characters, 1 uppercase, 1 number)",
-                "5. Try logging in with the new password",
-            ],
-        }
-    elif "payment" in customer_message or "checkout" in customer_message:
-        kb_article = {
-            "title": "Payment / Checkout Issues",
-            "steps": [
-                "1. Verify your card details are entered correctly",
-                "2. Ensure your card has sufficient balance",
-                "3. Try a different payment method",
-                "4. Disable any VPN or ad-blocker that might interfere",
-                "5. Try using a different browser or the mobile app",
-            ],
-        }
-    else:
-        kb_article = {
-            "title": "General Technical Troubleshooting",
-            "steps": [
-                "1. Clear your browser cache and cookies",
-                "2. Try using a different browser",
-                "3. Check your internet connection",
-                "4. Disable browser extensions",
-                "5. Contact our technical team if the issue persists",
-            ],
-        }
+    # Extract keywords from the customer message for DB search
+    search_keywords = []
+    keyword_map = {
+        "crash": ["crash", "crashing"],
+        "login": ["login", "password", "sign in", "locked out"],
+        "payment": ["payment", "checkout", "card", "declined"],
+        "general": ["error", "bug", "glitch", "not working"],
+    }
+    for tag_keywords in keyword_map.values():
+        for kw in tag_keywords:
+            if kw in customer_message:
+                search_keywords.append(kw)
+
+    if not search_keywords:
+        search_keywords = ["error"]  # fallback
+
+    # --- Database Query: Knowledge Base ---
+    kb_result = query_kb_article(search_keywords)
+    kb_article = kb_result["data"]
 
     handler_context = {
         "handler": "technical",
+        "db_query": kb_result["query"],
+        "db_status": kb_result["status"],
+        "match_score": kb_result.get("match_score", 0),
         "kb_article": kb_article,
         "instructions": (
             "Walk the customer through the troubleshooting steps from the "
@@ -255,23 +244,18 @@ def handle_technical(state: CustomerSupportState) -> dict:
 # ===========================================================================
 def handle_general(state: CustomerSupportState) -> dict:
     """
-    Handles general queries: business hours, FAQs, greetings, etc.
-    In a real system, this might query an FAQ database or CRM.
+    Queries the FAQ database for relevant answers.
+    In production, this would query: SELECT * FROM faqs ORDER BY views DESC
     """
-    # --- Simulated FAQ database ---
-    faq_data = {
-        "business_hours": "Monday - Friday: 9:00 AM to 6:00 PM IST. "
-                          "Saturday: 10:00 AM to 4:00 PM IST. Sunday: Closed.",
-        "contact_email": "support@shopease.com",
-        "contact_phone": "+91-1800-123-4567 (Toll Free)",
-        "shipping_info": "Free shipping on orders above ₹499. "
-                         "Standard delivery takes 3-5 business days.",
-        "store_locations": "We are an online-only store with warehouses in "
-                           "Mumbai, Delhi, and Bangalore.",
-    }
+    # --- Database Query: FAQ Table ---
+    faq_result = query_faqs()
+    faq_data = faq_result["data"]
 
     handler_context = {
         "handler": "general",
+        "db_query": faq_result["query"],
+        "db_status": faq_result["status"],
+        "rows_returned": faq_result["rows_returned"],
         "faq_data": faq_data,
         "instructions": (
             "Answer the customer's question using the FAQ data. "
@@ -380,6 +364,15 @@ def escalate_to_human(state: CustomerSupportState) -> dict:
     escalation_reason = state.get("escalation_reason", "Unspecified")
     handler_context = state.get("handler_context", {})
 
+    # --- Database Insert: Create support ticket ---
+    ticket_result = insert_support_ticket(
+        customer_message=customer_message,
+        issue_type=issue_type,
+        escalation_reason=escalation_reason,
+        handler_context=handler_context,
+    )
+    ticket = ticket_result["data"]
+
     # Generate a customer-facing escalation message
     escalation_response = (
         f"Thank you for reaching out to ShopEase. I understand your concern, "
@@ -387,9 +380,10 @@ def escalate_to_human(state: CustomerSupportState) -> dict:
         f"I am connecting you with a senior support specialist who will be able "
         f"to help you further. Your case has been flagged as priority.\n\n"
         f"📋 **Your Case Summary:**\n"
+        f"- Ticket ID: {ticket['ticket_id']}\n"
         f"- Issue Type: {issue_type.title()}\n"
-        f"- Escalation Reason: {escalation_reason}\n"
-        f"- Reference ID: ESC-2026-{hash(customer_message) % 10000:04d}\n\n"
+        f"- Priority: {ticket['priority'].upper()}\n"
+        f"- Escalation Reason: {escalation_reason}\n\n"
         f"A human agent will respond within 15 minutes during business hours "
         f"(Mon-Fri, 9 AM - 6 PM IST).\n\n"
         f"— ShopEase Support Team"
